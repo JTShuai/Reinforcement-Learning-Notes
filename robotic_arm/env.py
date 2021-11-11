@@ -95,8 +95,7 @@ class ArmEnv(object):
 
     def sample_action(self):
         """
-        为了完成所有任务, 我们需要让环境产生一些随机动作, 用来测试现在的这个环境可行性。
-        还有每次开始回合的时候, 手臂的初始状态也可以在这里设置。
+        随机动作，仅用于测试
         """
         # two radians
         return np.random.rand(2)-0.5
