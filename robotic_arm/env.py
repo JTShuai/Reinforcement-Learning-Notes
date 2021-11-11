@@ -28,11 +28,62 @@ class ArmEnv(object):
         # 两段手臂的端点角度
         self.arm_info['r'] = np.pi / 6
 
+        self.on_goal = 0
+
     def step(self, action):
-        pass
+        """
+        更新手臂的运动，下一时刻的信息
+        """
+        done = False
+
+        # 计算单位时间 dt 内旋转的角度, 将角度限制在360度以内
+        action = np.clip(action, *self.action_bound)
+        self.arm_info['r'] += action * self.dt
+        self.arm_info['r'] %= np.pi * 2    # normalize
+
+        # 所以需要计算 finger 的坐标
+        (a1l, a2l) = self.arm_info['l']  # radius, arm length
+        (a1r, a2r) = self.arm_info['r']  # radian, angle
+        a1xy = np.array([200., 200.])    # a1 start (x0, y0)
+        a1xy_ = np.array([np.cos(a1r), np.sin(a1r)]) * a1l + a1xy  # a1 end and a2 start (x1, y1)
+        finger = np.array([np.cos(a1r + a2r), np.sin(a1r + a2r)]) * a2l + a1xy_  # a2 end (x2, y2)
+
+        # normalize features
+        dist1 = [(self.goal['x'] - a1xy_[0]) / 400, (self.goal['y'] - a1xy_[1]) / 400]
+        dist2 = [(self.goal['x'] - finger[0]) / 400, (self.goal['y'] - finger[1]) / 400]
+        r = -np.sqrt(dist2[0]**2+dist2[1]**2)
+
+        # 如果手指接触到蓝色的 goal, 我们判定结束回合 (done)
+        if self.goal['x'] - self.goal['l']/2 < finger[0] < self.goal['x'] + self.goal['l']/2:
+            if self.goal['y'] - self.goal['l']/2 < finger[1] < self.goal['y'] + self.goal['l']/2:
+                r += 1.
+                self.on_goal += 1
+                if self.on_goal > 50:
+                    done = True
+        else:
+            self.on_goal = 0
+
+        # state
+        s = np.concatenate((a1xy_/200, finger/200, dist1 + dist2, [1. if self.on_goal else 0.]))
+
+        return s, r, done
 
     def reset(self):
-        pass
+        self.goal['x'] = np.random.rand()*400.
+        self.goal['y'] = np.random.rand()*400.
+        self.arm_info['r'] = 2 * np.pi * np.random.rand(2)
+        self.on_goal = 0
+        (a1l, a2l) = self.arm_info['l']  # radius, arm length
+        (a1r, a2r) = self.arm_info['r']  # radian, angle
+        a1xy = np.array([200., 200.])  # a1 start (x0, y0)
+        a1xy_ = np.array([np.cos(a1r), np.sin(a1r)]) * a1l + a1xy  # a1 end and a2 start (x1, y1)
+        finger = np.array([np.cos(a1r + a2r), np.sin(a1r + a2r)]) * a2l + a1xy_  # a2 end (x2, y2)
+        # normalize features
+        dist1 = [(self.goal['x'] - a1xy_[0])/400, (self.goal['y'] - a1xy_[1])/400]
+        dist2 = [(self.goal['x'] - finger[0])/400, (self.goal['y'] - finger[1])/400]
+        # state
+        s = np.concatenate((a1xy_/200, finger/200, dist1 + dist2, [1. if self.on_goal else 0.]))
+        return s
 
     def render(self):
         if self.viewer is None:
@@ -42,6 +93,13 @@ class ArmEnv(object):
         # 使用 Viewer 中的 render 功能
         self.viewer.render()
 
+    def sample_action(self):
+        """
+        为了完成所有任务, 我们需要让环境产生一些随机动作, 用来测试现在的这个环境可行性。
+        还有每次开始回合的时候, 手臂的初始状态也可以在这里设置。
+        """
+        # two radians
+        return np.random.rand(2)-0.5
 
 class Viewer(pyglet.window.Window):
     """
@@ -62,8 +120,11 @@ class Viewer(pyglet.window.Window):
         # 窗口背景颜色
         pyglet.gl.glClearColor(1, 1, 1, 1)
 
+        # 添加 arm 信息
         self.arm_info = arm_info
         self.goal_info = goal
+
+        # 添加窗口中心点，即手臂旋转围绕的中心点
         self.center_coord = np.array([200, 200])
 
         # 将手臂的作图信息放入 batch
@@ -71,7 +132,7 @@ class Viewer(pyglet.window.Window):
         self.batch = pyglet.graphics.Batch()
 
         # 矩形, 有四个顶点, 就能使用 GL_QUADS 这种形式
-        self.point = self.batch.add(
+        self.goal = self.batch.add(
             4, pyglet.gl.GL_QUADS, None,    # 4 corners
             ('v2f', [goal['x'] - goal['l'] / 2, goal['y'] - goal['l'] / 2,                # location
                      goal['x'] - goal['l'] / 2, goal['y'] + goal['l'] / 2,
@@ -113,17 +174,53 @@ class Viewer(pyglet.window.Window):
         self.batch.draw()
 
     def _update_arm(self):
-        # 更新手臂的位置信息
-        pass
+        """
+        有了 self.arm_info 信息后，在屏幕上显示手臂的移动信息
+        """
 
+        # update goal
+        self.goal.vertices = (
+            self.goal_info['x'] - self.goal_info['l']/2, self.goal_info['y'] - self.goal_info['l']/2,
+            self.goal_info['x'] + self.goal_info['l']/2, self.goal_info['y'] - self.goal_info['l']/2,
+            self.goal_info['x'] + self.goal_info['l']/2, self.goal_info['y'] + self.goal_info['l']/2,
+            self.goal_info['x'] - self.goal_info['l']/2, self.goal_info['y'] + self.goal_info['l']/2)
+
+        # update arm
+        # radius, arm length
+        (a1l, a2l) = self.arm_info['l']
+        # radian, angle
+        (a1r, a2r) = self.arm_info['r']
+        # a1 start (x0, y0)
+        a1xy = self.center_coord
+        # a1 end and a2 start (x1, y1)
+        a1xy_ = np.array([np.cos(a1r), np.sin(a1r)]) * a1l + a1xy
+        # a2 end (x2, y2)
+        a2xy_ = np.array([np.cos(a1r+a2r), np.sin(a1r+a2r)]) * a2l + a1xy_
+
+        # 第一段手臂的4个点信息
+        a1tr, a2tr = np.pi / 2 - self.arm_info['r'][0], np.pi / 2 - self.arm_info['r'].sum()
+        xy01 = a1xy + np.array([-np.cos(a1tr), np.sin(a1tr)]) * self.bar_thc
+        xy02 = a1xy + np.array([np.cos(a1tr), -np.sin(a1tr)]) * self.bar_thc
+        xy11 = a1xy_ + np.array([np.cos(a1tr), -np.sin(a1tr)]) * self.bar_thc
+        xy12 = a1xy_ + np.array([-np.cos(a1tr), np.sin(a1tr)]) * self.bar_thc
+
+        # 第二段手臂的4个点信息
+        xy11_ = a1xy_ + np.array([np.cos(a2tr), -np.sin(a2tr)]) * self.bar_thc
+        xy12_ = a1xy_ + np.array([-np.cos(a2tr), np.sin(a2tr)]) * self.bar_thc
+        xy21 = a2xy_ + np.array([-np.cos(a2tr), np.sin(a2tr)]) * self.bar_thc
+        xy22 = a2xy_ + np.array([np.cos(a2tr), -np.sin(a2tr)]) * self.bar_thc
+
+        # 将点信息都放入手臂显示中
+        self.arm1.vertices = np.concatenate((xy01, xy02, xy11, xy12))
+        self.arm2.vertices = np.concatenate((xy11_, xy12_, xy21, xy22))
+
+    # convert the mouse coordinate to goal's coordinate
+    def on_mouse_motion(self, x, y, dx, dy):
+        self.goal_info['x'] = x
+        self.goal_info['y'] = y
 
 if __name__ == '__main__':
-    arm_info = np.zeros(
-        2, dtype=[('l', np.float32), ('r', np.float32)])
-    print(arm_info)
-    # 生成出 (2,2) 的矩阵
-    # 两段手臂都 100 长
-    arm_info['l'] = 100
-    # 两段手臂的端点角度
-    arm_info['r'] = np.pi / 6
-    print(arm_info)
+    env = ArmEnv()
+    while True:
+        env.render()
+        env.step(env.sample_action())
